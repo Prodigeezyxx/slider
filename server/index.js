@@ -11,6 +11,7 @@ import * as store from './store.js'
 import { recordUsage, usageSummary } from './usage.js'
 import { generateImage, planDeck, planAgentDeck, verifySlide, IMAGE_MODEL, TEXT_MODEL } from './openrouter.js'
 import { painterKnowledgeSlice, castingBrief } from './knowledge/index.js'
+import { rasterizeSvgToPng } from './svg.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const app = new Hono()
@@ -20,6 +21,27 @@ const MIME = {
   '.jpg': 'image/jpeg',
   '.jpeg': 'image/jpeg',
   '.webp': 'image/webp',
+  '.svg': 'image/svg+xml',
+}
+
+// Save an uploaded file. If it's an SVG, also render a companion PNG alongside it —
+// AI vision/image APIs need raster pixels, never vector XML, but we keep the original
+// SVG for crisp on-screen display. Returns { fileName, rasterFileName } (rasterFileName
+// is null for non-SVG uploads).
+function persistUpload(dir, safeBase, ext, buffer) {
+  const fileName = `${safeBase}${ext}`
+  fs.writeFileSync(path.join(dir, fileName), buffer)
+  let rasterFileName = null
+  if (ext === '.svg') {
+    try {
+      const png = rasterizeSvgToPng(buffer)
+      rasterFileName = `${safeBase}.raster.png`
+      fs.writeFileSync(path.join(dir, rasterFileName), png)
+    } catch (e) {
+      console.warn(`SVG rasterize failed: ${e.message}`)
+    }
+  }
+  return { fileName, rasterFileName }
 }
 
 // ---------- Agent specs ----------
@@ -101,12 +123,18 @@ app.post('/api/decks/:id/assets', async (c) => {
   const saved = []
   for (const f of files) {
     const ext = path.extname(f.name).toLowerCase() || '.png'
-    const safe = `${role}-${Date.now().toString(36)}${ext}`
-    fs.writeFileSync(path.join(dir, safe), Buffer.from(await f.arrayBuffer()))
-    const webPath = `/images/${deck.id}/refs/${safe}`
-    if (role === 'logo') deck.brand.logo = webPath
-    else deck.references.push({ name: f.name, path: webPath })
-    saved.push({ name: f.name, path: webPath, role })
+    const safeBase = `${role}-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 5)}`
+    const buf = Buffer.from(await f.arrayBuffer())
+    const { fileName, rasterFileName } = persistUpload(dir, safeBase, ext, buf)
+    const webPath = `/images/${deck.id}/refs/${fileName}`
+    const rasterPath = rasterFileName ? `/images/${deck.id}/refs/${rasterFileName}` : null
+    if (role === 'logo') {
+      deck.brand.logo = webPath
+      deck.brand.logoRaster = rasterPath
+    } else {
+      deck.references.push({ name: f.name, path: webPath, raster: rasterPath })
+    }
+    saved.push({ name: f.name, path: webPath, raster: rasterPath, role })
   }
   store.saveDeck(deck)
   return c.json({ saved, deck })
@@ -131,11 +159,13 @@ app.post('/api/decks/:id/slides/:sid/refs', async (c) => {
   const added = []
   for (const f of files) {
     const ext = path.extname(f.name).toLowerCase() || '.png'
-    const safe = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}${ext}`
-    fs.writeFileSync(path.join(dir, safe), Buffer.from(await f.arrayBuffer()))
-    const webPath = `/images/${deck.id}/refs/slide-${slide.id}/${safe}`
-    slide.refs.push({ name: f.name, path: webPath })
-    added.push({ name: f.name, path: webPath })
+    const safeBase = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`
+    const buf = Buffer.from(await f.arrayBuffer())
+    const { fileName, rasterFileName } = persistUpload(dir, safeBase, ext, buf)
+    const webPath = `/images/${deck.id}/refs/slide-${slide.id}/${fileName}`
+    const rasterPath = rasterFileName ? `/images/${deck.id}/refs/slide-${slide.id}/${rasterFileName}` : null
+    slide.refs.push({ name: f.name, path: webPath, raster: rasterPath })
+    added.push({ name: f.name, path: webPath, raster: rasterPath })
   }
   store.saveDeck(deck)
   return c.json({ added, slide })
@@ -149,10 +179,15 @@ app.delete('/api/decks/:id/slides/:sid/refs', async (c) => {
   const { path: refPath } = await c.req.json().catch(() => ({}))
   if (!refPath) return c.json({ error: 'ref path required' }, 400)
 
+  const target = (slide.refs || []).find((r) => r.path === refPath)
   slide.refs = (slide.refs || []).filter((r) => r.path !== refPath)
-  const rel = path.normalize(refPath.replace(/^\/images\//, ''))
-  const file = path.join(store.IMAGES, rel)
-  if (file.startsWith(store.IMAGES) && fs.existsSync(file)) fs.unlinkSync(file)
+
+  for (const p of [refPath, target?.raster]) {
+    if (!p) continue
+    const rel = path.normalize(p.replace(/^\/images\//, ''))
+    const file = path.join(store.IMAGES, rel)
+    if (file.startsWith(store.IMAGES) && fs.existsSync(file)) fs.unlinkSync(file)
+  }
 
   store.saveDeck(deck)
   return c.json({ slide })
@@ -224,7 +259,9 @@ app.post('/api/agent/plan', async (c) => {
 
 function logoDataUrl(deck) {
   if (!deck.brand?.logo) return null
-  const rel = deck.brand.logo.replace(/^\/images\//, '')
+  // SVG logos can't be sent to the image/vision APIs as-is — use the rasterized PNG companion.
+  const preferred = deck.brand.logoRaster || deck.brand.logo
+  const rel = preferred.replace(/^\/images\//, '')
   const file = path.join(store.IMAGES, rel)
   if (!file.startsWith(store.IMAGES) || !fs.existsSync(file)) return null
   const mime = MIME[path.extname(file).toLowerCase()] || 'image/png'
@@ -253,8 +290,9 @@ app.post('/api/generate', async (c) => {
   const logo = logoDataUrl(deck)
 
   // Slide-level references the user uploaded next to the prompt.
+  // SVG refs use their rasterized PNG companion for AI input (kept .svg for on-screen display).
   const slideRefs = Array.isArray(slide.refs) ? slide.refs : []
-  const slideRefData = slideRefs.map((r) => imagePathToDataUrl(r.path)).filter(Boolean)
+  const slideRefData = slideRefs.map((r) => imagePathToDataUrl(r.raster || r.path)).filter(Boolean)
 
   const knowledgeSlice = spec ? painterKnowledgeSlice(deck.brand || {}) : ''
   const parts = [

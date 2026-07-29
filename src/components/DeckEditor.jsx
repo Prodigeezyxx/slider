@@ -474,7 +474,7 @@ export default function DeckEditor({ deckId, onBack }) {
                       <ImageIcon className="w-4 h-4" />
                       <input
                         type="file"
-                        accept="image/*"
+                        accept="image/*,.svg"
                         multiple
                         onChange={(e) => { const fs = [...e.target.files]; e.target.value = ''; addSlideRefs(current.id, fs) }}
                         className="hidden"

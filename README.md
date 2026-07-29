@@ -148,11 +148,18 @@ Spins up the server on `:8787` and Vite on `:5173`. Vite proxies `/api/*` and `/
 
 ### Reference images (per-slide and deck-wide)
 
-Every prompt box in the UI accepts reference images. They are passed to Nano Banana Pro as `input_references` when the slide is painted, and to the planner as vision input when the deck is planned.
+Every prompt box in the UI accepts reference images, **including SVG**. They are passed to Nano Banana Pro as `input_references` when the slide is painted, and to the planner as vision input when the deck is planned.
 
 - **Per-slide, in the editor.** Below every slide's Image prompt textarea there is a thumbnail strip with a `+` tile. Drop 1–6 images per slide. These are persisted on disk (`data/images/<deckId>/refs/slide-<slideId>/`) and stored on `slide.refs[]`. They come along every time the slide is regenerated, alongside the deck's logo. Delete any thumbnail with the X button — the file is removed too.
 - **Deck-wide, in the Agent modal.** When you plan a new deck with the immersive-brand-experience agent, the modal has a "Visual reference board" picker. These images are one-shot: they influence the planner call (the LLM sees them as vision input) but are not persisted. Use them to feed the planner a moodboard, past work samples, subject photos, or product likenesses.
 - **Deck-wide, in the AI outline modal.** Same picker, one-shot, for the simpler non-agent deck flow.
+
+#### SVG support
+
+Brand logos are very often SVG, so every upload point (logo, per-slide refs, agent/outline reference boards) accepts `.svg` alongside raster formats. But **Nano Banana Pro and the vision verifier only accept raster pixels — never vector XML** — so the harness handles this transparently:
+
+- **Server-side persistent uploads** (logo, per-slide refs): on upload, if the file is SVG, the server immediately rasterizes a companion PNG using [`@resvg/resvg-js`](https://github.com/thx/resvg-js) and stores both. The original SVG is kept and served (`image/svg+xml`) for crisp on-screen thumbnails; the rasterized PNG companion is what actually gets sent to the image/vision APIs. This is invisible to you — upload an SVG logo and it just works.
+- **Client-side transient refs** (agent modal / AI outline reference boards): the picker rasterizes any image — including SVG — via the browser's own `<img>` rendering pipeline onto a canvas (more reliable across browsers than `createImageBitmap`, which has inconsistent SVG support), then flattens to JPEG with a white matte for any transparency.
 
 ### Costs
 
@@ -232,8 +239,8 @@ All endpoints are on `:8787` (proxied through `:5173` in dev).
 | PUT | `/api/decks/:id` | Save a deck |
 | DELETE | `/api/decks/:id` | Delete deck + its images |
 | POST | `/api/context-upload` | Multipart upload of `.txt / .md / .pdf`; returns extracted text |
-| POST | `/api/decks/:id/assets` | Multipart upload of logo or reference images |
-| POST | `/api/decks/:id/slides/:sid/refs` | Multipart upload of per-slide reference images. Stored on `slide.refs[]` and passed to Nano Banana Pro as `input_references` when the slide is painted. |
+| POST | `/api/decks/:id/assets` | Multipart upload of logo or reference images. SVG uploads get an auto-rasterized `.raster.png` companion (`deck.brand.logoRaster` / `reference.raster`). |
+| POST | `/api/decks/:id/slides/:sid/refs` | Multipart upload of per-slide reference images. Stored on `slide.refs[]` and passed to Nano Banana Pro as `input_references` when the slide is painted. SVG uploads get an auto-rasterized `.raster.png` companion (`ref.raster`), which is what's actually sent to the AI. |
 | DELETE | `/api/decks/:id/slides/:sid/refs` | Remove one slide reference. Body: `{ path }` (the ref web path). Deletes the file from disk too. |
 | GET | `/api/agents` | List loaded agent specs |
 | POST | `/api/agent/plan` | Plan a deck. Body: `{ deckId, agentId, deckType, brand, refs? }`. `refs` is an optional array of `data:image/...;base64` URLs used as vision input to the planner. |
@@ -254,6 +261,9 @@ data/
 ├── images/<deckId>/          # painted slides (.jpg or .png)
 │   ├── <slideId>.jpg
 │   └── refs/                 # uploaded logo + reference images
+│       ├── logo-*.svg / .png         # original upload (served for display)
+│       ├── logo-*.raster.png         # auto-generated if the logo was SVG (sent to the AI)
+│       └── slide-<slideId>/          # per-slide references, same original+raster pairing
 ├── usage.jsonl               # append-only usage log for cost counter
 ├── server.log, vite.log      # runtime logs
 ```

@@ -1,17 +1,35 @@
 import { useEffect, useState } from 'react'
 import { X, ImagePlus } from 'lucide-react'
 
-// Read a File into a data:image/...;base64 string. Cap side to keep prompt tokens sane.
+// Read a File into a data:image/jpeg;base64 string. Cap side to keep prompt tokens sane.
+// Uses <img> + canvas (not createImageBitmap) so SVG rasterizes reliably across browsers —
+// createImageBitmap's SVG support is inconsistent, but every browser can paint <img src="*.svg">.
 async function fileToDataUrl(file, maxSide = 1024) {
-  const bmp = await createImageBitmap(file)
-  const scale = Math.min(1, maxSide / Math.max(bmp.width, bmp.height))
-  const w = Math.round(bmp.width * scale)
-  const h = Math.round(bmp.height * scale)
-  const canvas = document.createElement('canvas')
-  canvas.width = w
-  canvas.height = h
-  canvas.getContext('2d').drawImage(bmp, 0, 0, w, h)
-  return canvas.toDataURL('image/jpeg', 0.85)
+  const url = URL.createObjectURL(file)
+  try {
+    const img = await new Promise((resolve, reject) => {
+      const el = new Image()
+      el.onload = () => resolve(el)
+      el.onerror = () => reject(new Error(`Could not read ${file.name}`))
+      el.src = url
+    })
+    const iw = img.naturalWidth || img.width || 1024
+    const ih = img.naturalHeight || img.height || 1024
+    const scale = Math.min(1, maxSide / Math.max(iw, ih))
+    const w = Math.max(1, Math.round(iw * scale))
+    const h = Math.max(1, Math.round(ih * scale))
+    const canvas = document.createElement('canvas')
+    canvas.width = w
+    canvas.height = h
+    const ctx = canvas.getContext('2d')
+    // Matte transparent SVG/PNG backgrounds to white before flattening to JPEG (no alpha channel).
+    ctx.fillStyle = '#ffffff'
+    ctx.fillRect(0, 0, w, h)
+    ctx.drawImage(img, 0, 0, w, h)
+    return canvas.toDataURL('image/jpeg', 0.85)
+  } finally {
+    URL.revokeObjectURL(url)
+  }
 }
 
 // Reusable transient image picker: stores base64 data URLs in local state.
@@ -51,7 +69,7 @@ export function RefImagePicker({ refs, setRefs, max = 6, label = 'Reference imag
         {refs.length < max && (
           <label className="w-16 h-16 rounded border border-dashed border-zinc-700 hover:border-amber-400/60 flex items-center justify-center cursor-pointer text-zinc-500 hover:text-amber-300">
             <ImagePlus className="w-5 h-5" />
-            <input type="file" accept="image/*" multiple onChange={onFiles} className="hidden" />
+            <input type="file" accept="image/*,.svg" multiple onChange={onFiles} className="hidden" />
           </label>
         )}
       </div>
@@ -292,7 +310,7 @@ export function AgentModal({ deck, agent, busy, onRun, onClose }) {
         )}
         <input
           type="file"
-          accept="image/*"
+          accept="image/*,.svg"
           onChange={(e) => setLogoFile(e.target.files[0] || null)}
           className="mt-1 block w-full text-sm text-zinc-400 file:mr-3 file:py-2 file:px-4 file:rounded-lg file:border-0 file:bg-zinc-800 file:text-zinc-200 hover:file:bg-zinc-700"
         />
