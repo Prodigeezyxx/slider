@@ -72,13 +72,14 @@ function parseJsonObject(text) {
 
 // ---------- Simple outline agent (generic decks) ----------
 
-export async function planDeck({ topic, context = '', count = 8, style = '' }) {
+export async function planDeck({ topic, context = '', count = 8, style = '', refs = [] }) {
   const system =
     'You are a world-class presentation designer. You create slide decks where every slide is a single AI-generated image.'
 
   const user = `Create a ${count}-slide presentation deck about: "${topic}".
 ${style ? `\nThe deck's visual style guide (all slides must follow it): ${style}` : ''}
 ${context ? `\nUse the following reference material as the source of truth for the content:\n${context}` : ''}
+${refs.length ? `\nThe user has attached ${refs.length} reference image${refs.length === 1 ? '' : 's'} — use them as inspiration for composition, subjects, and visual direction across the deck.` : ''}
 
 Return ONLY a JSON array of exactly ${count} objects with this shape:
 [{"title": "...", "prompt": "...", "notes": "..."}, ...]
@@ -90,10 +91,17 @@ Rules:
 - Ground the content in the reference material when provided. Do not invent facts that contradict it.
 - Output raw JSON only. No markdown fences, no commentary.`
 
-  const { text, usage, cost } = await chat([
-    { role: 'system', content: system },
-    { role: 'user', content: user },
-  ])
+  const messages = [{ role: 'system', content: system }]
+  if (refs.length) {
+    messages.push({
+      role: 'user',
+      content: [{ type: 'text', text: user }, ...refs.map((url) => ({ type: 'image_url', image_url: { url } }))],
+    })
+  } else {
+    messages.push({ role: 'user', content: user })
+  }
+
+  const { text, usage, cost } = await chat(messages)
   const slides = parseJsonArray(text)
   if (!Array.isArray(slides) || slides.length === 0) throw new Error('Model returned an empty outline')
   return {
@@ -109,7 +117,7 @@ Rules:
 
 // ---------- Planner agent (agent-spec decks) ----------
 
-export async function planAgentDeck({ spec, deckType, brand, context = '' }) {
+export async function planAgentDeck({ spec, deckType, brand, context = '', refs = [] }) {
   const structure = spec.decks[deckType]
   const table = structure.slides.map((row, i) => `${i + 1}. ${row[0]} — ${row[1]}`).join('\n')
 
@@ -130,6 +138,7 @@ ${knowledge}`
 - Audiences (ranked primary first): ${brand.audiences}
 - Delivery studio: ${brand.studio || 'the studio'}
 ${context ? `\nREFERENCE MATERIAL (source of truth):\n${context}` : ''}
+${refs.length ? `\nVISUAL REFERENCES: ${refs.length} image${refs.length === 1 ? '' : 's'} attached. Use them as inspiration for materials, mood, composition, or subject likeness across the deck.` : ''}
 
 DECK TO WRITE: ${structure.label}
 Follow this required structure exactly — one output slide per row:
@@ -150,10 +159,17 @@ Rules for each slide:
 - "notes": 2-3 sentence presenter script that answers the question this slide is designed to trigger.
 Raw JSON only. No markdown fences.`
 
-  const { text, usage, cost } = await chat([
-    { role: 'system', content: system },
-    { role: 'user', content: user },
-  ])
+  const messages = [{ role: 'system', content: system }]
+  if (refs.length) {
+    messages.push({
+      role: 'user',
+      content: [{ type: 'text', text: user }, ...refs.map((url) => ({ type: 'image_url', image_url: { url } }))],
+    })
+  } else {
+    messages.push({ role: 'user', content: user })
+  }
+
+  const { text, usage, cost } = await chat(messages)
   const slides = parseJsonArray(text)
   if (!Array.isArray(slides) || slides.length === 0) throw new Error('Planner returned an empty deck')
   return {

@@ -1,5 +1,64 @@
 import { useEffect, useState } from 'react'
-import { X } from 'lucide-react'
+import { X, ImagePlus } from 'lucide-react'
+
+// Read a File into a data:image/...;base64 string. Cap side to keep prompt tokens sane.
+async function fileToDataUrl(file, maxSide = 1024) {
+  const bmp = await createImageBitmap(file)
+  const scale = Math.min(1, maxSide / Math.max(bmp.width, bmp.height))
+  const w = Math.round(bmp.width * scale)
+  const h = Math.round(bmp.height * scale)
+  const canvas = document.createElement('canvas')
+  canvas.width = w
+  canvas.height = h
+  canvas.getContext('2d').drawImage(bmp, 0, 0, w, h)
+  return canvas.toDataURL('image/jpeg', 0.85)
+}
+
+// Reusable transient image picker: stores base64 data URLs in local state.
+// Used by AgentModal + AIDeckModal (refs don't persist beyond the request).
+export function RefImagePicker({ refs, setRefs, max = 6, label = 'Reference images (optional)' }) {
+  const [error, setError] = useState(null)
+
+  async function onFiles(e) {
+    const files = [...(e.target.files || [])].filter((f) => f.type.startsWith('image/'))
+    e.target.value = ''
+    if (!files.length) return
+    setError(null)
+    try {
+      const urls = await Promise.all(files.map((f) => fileToDataUrl(f)))
+      setRefs([...refs, ...urls].slice(0, max))
+    } catch (err) {
+      setError(err.message || 'Could not read image')
+    }
+  }
+
+  return (
+    <div>
+      <label className="text-xs text-zinc-500 uppercase tracking-wide">{label}</label>
+      <div className="mt-1 flex flex-wrap gap-2">
+        {refs.map((url, i) => (
+          <div key={i} className="relative w-16 h-16 rounded overflow-hidden border border-zinc-800">
+            <img src={url} alt="" className="w-full h-full object-cover" />
+            <button
+              onClick={() => setRefs(refs.filter((_, j) => j !== i))}
+              className="absolute top-0 right-0 bg-black/70 text-white p-0.5 hover:bg-red-500"
+              title="Remove"
+            >
+              <X className="w-3 h-3" />
+            </button>
+          </div>
+        ))}
+        {refs.length < max && (
+          <label className="w-16 h-16 rounded border border-dashed border-zinc-700 hover:border-amber-400/60 flex items-center justify-center cursor-pointer text-zinc-500 hover:text-amber-300">
+            <ImagePlus className="w-5 h-5" />
+            <input type="file" accept="image/*" multiple onChange={onFiles} className="hidden" />
+          </label>
+        )}
+      </div>
+      {error && <div className="text-xs text-red-400 mt-1">{error}</div>}
+    </div>
+  )
+}
 
 export function Modal({ title, onClose, children, wide = false }) {
   return (
@@ -163,6 +222,7 @@ export function AgentModal({ deck, agent, busy, onRun, onClose }) {
     studio: b.studio || '',
   })
   const [logoFile, setLogoFile] = useState(null)
+  const [refs, setRefs] = useState([])
   const set = (k) => (e) => setForm({ ...form, [k]: e.target.value })
   const types = Object.entries(agent.decks)
 
@@ -238,6 +298,10 @@ export function AgentModal({ deck, agent, busy, onRun, onClose }) {
         />
       </div>
 
+      <div className="mt-3">
+        <RefImagePicker refs={refs} setRefs={setRefs} label="Visual reference board (moodboard, past work, subjects) — optional" />
+      </div>
+
       <p className="text-xs text-zinc-500 mt-4">
         Uses deck context ({deck.context?.length || 0} item{deck.context?.length === 1 ? '' : 's'}) as the source of truth. Planner
         writes all {agent.decks[deckType].count} slides, then Nano Banana Pro paints each one with the QA verifier loop. This
@@ -246,7 +310,7 @@ export function AgentModal({ deck, agent, busy, onRun, onClose }) {
       <div className="flex justify-end mt-4">
         <button
           disabled={!form.name.trim() || !form.location.trim() || busy}
-          onClick={() => onRun({ agentId: agent.id, deckType, brand: form, logoFile })}
+          onClick={() => onRun({ agentId: agent.id, deckType, brand: form, logoFile, refs })}
           className="bg-amber-400 text-zinc-950 font-medium px-4 py-2 rounded-lg hover:bg-amber-300 disabled:opacity-50"
           title={!form.location.trim() ? 'Event location is required so the render casts real people, not stock ones' : ''}
         >
@@ -260,6 +324,7 @@ export function AgentModal({ deck, agent, busy, onRun, onClose }) {
 export function AIDeckModal({ deck, busy, onGenerate, onClose }) {
   const [topic, setTopic] = useState('')
   const [count, setCount] = useState(8)
+  const [refs, setRefs] = useState([])
   return (
     <Modal title="Generate a full deck with AI" onClose={onClose} wide>
       <p className="text-sm text-zinc-400 mb-3">
@@ -285,10 +350,13 @@ export function AIDeckModal({ deck, busy, onGenerate, onClose }) {
           className="w-20 bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-sm outline-none"
         />
       </div>
+      <div className="mt-3">
+        <RefImagePicker refs={refs} setRefs={setRefs} label="Reference images to guide the whole deck (optional)" />
+      </div>
       <div className="flex justify-end mt-4">
         <button
           disabled={!topic.trim() || busy}
-          onClick={() => onGenerate(topic.trim(), count)}
+          onClick={() => onGenerate(topic.trim(), count, refs)}
           className="bg-amber-400 text-zinc-950 font-medium px-4 py-2 rounded-lg hover:bg-amber-300 disabled:opacity-50"
         >
           {busy ? 'Working…' : 'Build deck'}

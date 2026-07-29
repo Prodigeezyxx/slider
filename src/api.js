@@ -16,10 +16,12 @@ export const api = {
   saveDeck: (deck) => req('PUT', `/api/decks/${deck.id}`, deck),
   deleteDeck: (id) => req('DELETE', `/api/decks/${id}`),
   generate: (deckId, slideId, prompt) => req('POST', '/api/generate', { deckId, slideId, prompt }),
-  outline: (deckId, topic, count) => req('POST', '/api/outline', { deckId, topic, count }),
+  outline: (deckId, topic, count, refs) => req('POST', '/api/outline', { deckId, topic, count, refs }),
   uploadContext: (formData) => req('POST', '/api/context-upload', formData, true),
   agents: () => req('GET', '/api/agents'),
   planAgent: (payload) => req('POST', '/api/agent/plan', payload),
   uploadAssets: (deckId, formData) => req('POST', `/api/decks/${deckId}/assets`, formData, true),
+  uploadSlideRefs: (deckId, slideId, formData) => req('POST', `/api/decks/${deckId}/slides/${slideId}/refs`, formData, true),
+  deleteSlideRef: (deckId, slideId, path) => req('DELETE', `/api/decks/${deckId}/slides/${slideId}/refs`, { path }),
   usage: (deckId) => req('GET', `/api/usage${deckId ? `?deckId=${deckId}` : ''}`),
 }

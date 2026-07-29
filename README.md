@@ -146,6 +146,14 @@ Spins up the server on `:8787` and Vite on `:5173`. Vite proxies `/api/*` and `/
 5. Pick **Strategy Deck** or **Proposal Deck**, hit **Build**. The planner writes ~50 seconds of slide prompts, then the painter starts working through them one at a time. Each slide shows a verify badge when done.
 6. Individual slides can be regenerated from the editor — edit the prompt, click **Generate**.
 
+### Reference images (per-slide and deck-wide)
+
+Every prompt box in the UI accepts reference images. They are passed to Nano Banana Pro as `input_references` when the slide is painted, and to the planner as vision input when the deck is planned.
+
+- **Per-slide, in the editor.** Below every slide's Image prompt textarea there is a thumbnail strip with a `+` tile. Drop 1–6 images per slide. These are persisted on disk (`data/images/<deckId>/refs/slide-<slideId>/`) and stored on `slide.refs[]`. They come along every time the slide is regenerated, alongside the deck's logo. Delete any thumbnail with the X button — the file is removed too.
+- **Deck-wide, in the Agent modal.** When you plan a new deck with the immersive-brand-experience agent, the modal has a "Visual reference board" picker. These images are one-shot: they influence the planner call (the LLM sees them as vision input) but are not persisted. Use them to feed the planner a moodboard, past work samples, subject photos, or product likenesses.
+- **Deck-wide, in the AI outline modal.** Same picker, one-shot, for the simpler non-agent deck flow.
+
 ### Costs
 
 Roughly (as of writing, subject to OpenRouter pricing):
@@ -225,10 +233,12 @@ All endpoints are on `:8787` (proxied through `:5173` in dev).
 | DELETE | `/api/decks/:id` | Delete deck + its images |
 | POST | `/api/context-upload` | Multipart upload of `.txt / .md / .pdf`; returns extracted text |
 | POST | `/api/decks/:id/assets` | Multipart upload of logo or reference images |
+| POST | `/api/decks/:id/slides/:sid/refs` | Multipart upload of per-slide reference images. Stored on `slide.refs[]` and passed to Nano Banana Pro as `input_references` when the slide is painted. |
+| DELETE | `/api/decks/:id/slides/:sid/refs` | Remove one slide reference. Body: `{ path }` (the ref web path). Deletes the file from disk too. |
 | GET | `/api/agents` | List loaded agent specs |
-| POST | `/api/agent/plan` | Plan a deck. Body: `{ deckId, agentId, deckType, brand }` |
-| POST | `/api/generate` | Paint one slide. Body: `{ deckId, slideId, prompt?, verify? }` |
-| POST | `/api/outline` | Simple non-agent outline. Body: `{ deckId, topic, count }` |
+| POST | `/api/agent/plan` | Plan a deck. Body: `{ deckId, agentId, deckType, brand, refs? }`. `refs` is an optional array of `data:image/...;base64` URLs used as vision input to the planner. |
+| POST | `/api/generate` | Paint one slide. Body: `{ deckId, slideId, prompt?, verify? }`. Slide's stored `refs[]` are automatically included alongside the logo. |
+| POST | `/api/outline` | Simple non-agent outline. Body: `{ deckId, topic, count, refs? }`. |
 | GET | `/api/usage` | Cost counter. Query: `?deckId=...` for per-deck |
 | GET | `/images/*` | Serve painted images and reference uploads |
 

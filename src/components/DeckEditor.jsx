@@ -121,6 +121,33 @@ export default function DeckEditor({ deckId, onBack }) {
     }
   }
 
+  async function addSlideRefs(slideId, files) {
+    if (!files || !files.length) return
+    const fd = new FormData()
+    for (const f of files) fd.append('files', f)
+    try {
+      const { slide: updated } = await api.uploadSlideRefs(deckRef.current.id, slideId, fd)
+      update((d) => {
+        const s = d.slides.find((x) => x.id === slideId)
+        if (s) s.refs = updated.refs
+      })
+    } catch (e) {
+      setError(e.message)
+    }
+  }
+
+  async function removeSlideRef(slideId, refPath) {
+    try {
+      await api.deleteSlideRef(deckRef.current.id, slideId, refPath)
+      update((d) => {
+        const s = d.slides.find((x) => x.id === slideId)
+        if (s) s.refs = (s.refs || []).filter((r) => r.path !== refPath)
+      })
+    } catch (e) {
+      setError(e.message)
+    }
+  }
+
   async function generateMissing() {
     const targets = deckRef.current.slides.filter((s) => !s.image)
     if (!targets.length) return
@@ -132,12 +159,12 @@ export default function DeckEditor({ deckId, onBack }) {
     setBulk(null)
   }
 
-  async function buildDeck(topic, count) {
+  async function buildDeck(topic, count, refs) {
     setModal(null)
     setError(null)
     setBulk({ done: 0, total: 1, label: 'Planning outline…' })
     try {
-      const { slides } = await api.outline(deckRef.current.id, topic, count)
+      const { slides } = await api.outline(deckRef.current.id, topic, count, refs)
       const newSlides = slides.map((s) => ({ id: uid(), title: s.title, prompt: s.prompt, notes: s.notes, image: null, status: 'idle' }))
       const next = { ...deckRef.current, slides: newSlides }
       setDeck(next)
@@ -154,7 +181,7 @@ export default function DeckEditor({ deckId, onBack }) {
     setBulk(null)
   }
 
-  async function buildAgentDeck({ agentId, deckType, brand, logoFile }) {
+  async function buildAgentDeck({ agentId, deckType, brand, logoFile, refs }) {
     setModal(null)
     setError(null)
     setBulk({ done: 0, total: 1, label: 'Planning deck…' })
@@ -165,7 +192,7 @@ export default function DeckEditor({ deckId, onBack }) {
         fd.append('files', logoFile)
         await api.uploadAssets(deckRef.current.id, fd)
       }
-      const { deck: planned } = await api.planAgent({ deckId: deckRef.current.id, agentId, deckType, brand })
+      const { deck: planned } = await api.planAgent({ deckId: deckRef.current.id, agentId, deckType, brand, refs })
       setDeck(planned)
       deckRef.current = planned
       refreshUsage()
@@ -428,6 +455,39 @@ export default function DeckEditor({ deckId, onBack }) {
                 placeholder="Describe the slide: headline text, layout, visuals…"
                 className="mt-1 w-full bg-zinc-950 border border-zinc-800 rounded-lg p-3 text-sm outline-none focus:border-amber-400/60"
               />
+              <div className="mt-2">
+                <div className="flex items-center gap-2 flex-wrap">
+                  {(current.refs || []).map((r) => (
+                    <div key={r.path} className="relative w-14 h-14 rounded overflow-hidden border border-zinc-800 group">
+                      <img src={r.path} alt={r.name} className="w-full h-full object-cover" />
+                      <button
+                        onClick={() => removeSlideRef(current.id, r.path)}
+                        className="absolute top-0 right-0 bg-black/70 text-white p-0.5 opacity-0 group-hover:opacity-100 hover:bg-red-500"
+                        title="Remove reference"
+                      >
+                        <Trash2 className="w-3 h-3" />
+                      </button>
+                    </div>
+                  ))}
+                  {(current.refs || []).length < 6 && (
+                    <label className="w-14 h-14 rounded border border-dashed border-zinc-700 hover:border-amber-400/60 flex items-center justify-center cursor-pointer text-zinc-500 hover:text-amber-300" title="Attach reference image for this slide">
+                      <ImageIcon className="w-4 h-4" />
+                      <input
+                        type="file"
+                        accept="image/*"
+                        multiple
+                        onChange={(e) => { const fs = [...e.target.files]; e.target.value = ''; addSlideRefs(current.id, fs) }}
+                        className="hidden"
+                      />
+                    </label>
+                  )}
+                </div>
+                {(current.refs || []).length > 0 && (
+                  <div className="text-xs text-zinc-500 mt-1">
+                    {(current.refs || []).length} reference{(current.refs || []).length === 1 ? '' : 's'} attached — passed to Nano Banana Pro on Generate.
+                  </div>
+                )}
+              </div>
             </div>
             <button
               onClick={() => generateSlide(current)}

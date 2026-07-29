@@ -112,6 +112,52 @@ app.post('/api/decks/:id/assets', async (c) => {
   return c.json({ saved, deck })
 })
 
+// ---------- Per-slide reference images ----------
+
+app.post('/api/decks/:id/slides/:sid/refs', async (c) => {
+  const deck = store.getDeck(c.req.param('id'))
+  if (!deck) return c.json({ error: 'Deck not found' }, 404)
+  const slide = deck.slides.find((s) => s.id === c.req.param('sid'))
+  if (!slide) return c.json({ error: 'Slide not found' }, 404)
+
+  const body = await c.req.parseBody()
+  const files = [body.files].flat().filter((f) => f instanceof File)
+  if (files.length === 0) return c.json({ error: 'No files uploaded' }, 400)
+
+  const dir = path.join(store.imageDir(deck.id), 'refs', `slide-${slide.id}`)
+  fs.mkdirSync(dir, { recursive: true })
+  slide.refs = Array.isArray(slide.refs) ? slide.refs : []
+
+  const added = []
+  for (const f of files) {
+    const ext = path.extname(f.name).toLowerCase() || '.png'
+    const safe = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}${ext}`
+    fs.writeFileSync(path.join(dir, safe), Buffer.from(await f.arrayBuffer()))
+    const webPath = `/images/${deck.id}/refs/slide-${slide.id}/${safe}`
+    slide.refs.push({ name: f.name, path: webPath })
+    added.push({ name: f.name, path: webPath })
+  }
+  store.saveDeck(deck)
+  return c.json({ added, slide })
+})
+
+app.delete('/api/decks/:id/slides/:sid/refs', async (c) => {
+  const deck = store.getDeck(c.req.param('id'))
+  if (!deck) return c.json({ error: 'Deck not found' }, 404)
+  const slide = deck.slides.find((s) => s.id === c.req.param('sid'))
+  if (!slide) return c.json({ error: 'Slide not found' }, 404)
+  const { path: refPath } = await c.req.json().catch(() => ({}))
+  if (!refPath) return c.json({ error: 'ref path required' }, 400)
+
+  slide.refs = (slide.refs || []).filter((r) => r.path !== refPath)
+  const rel = path.normalize(refPath.replace(/^\/images\//, ''))
+  const file = path.join(store.IMAGES, rel)
+  if (file.startsWith(store.IMAGES) && fs.existsSync(file)) fs.unlinkSync(file)
+
+  store.saveDeck(deck)
+  return c.json({ slide })
+})
+
 // ---------- Agents ----------
 
 app.get('/api/agents', (c) =>
@@ -127,7 +173,7 @@ app.get('/api/agents', (c) =>
 )
 
 app.post('/api/agent/plan', async (c) => {
-  const { deckId, agentId, deckType, brand } = await c.req.json().catch(() => ({}))
+  const { deckId, agentId, deckType, brand, refs } = await c.req.json().catch(() => ({}))
   const spec = AGENTS[agentId]
   if (!spec) return c.json({ error: 'Unknown agent' }, 404)
   if (!spec.decks[deckType]) return c.json({ error: `Unknown deck type "${deckType}"` }, 400)
@@ -144,8 +190,13 @@ app.post('/api/agent/plan', async (c) => {
     .join('\n\n')
     .slice(0, 12000)
 
+  // Sanitize inbound refs: must be data:image/...;base64 URLs, cap count to keep tokens sane.
+  const cleanRefs = Array.isArray(refs)
+    ? refs.filter((s) => typeof s === 'string' && s.startsWith('data:image/')).slice(0, 6)
+    : []
+
   try {
-    const { slides, cost } = await planAgentDeck({ spec, deckType, brand: deck.brand, context })
+    const { slides, cost } = await planAgentDeck({ spec, deckType, brand: deck.brand, context, refs: cleanRefs })
     recordUsage({ deckId: deck.id, kind: 'plan', model: TEXT_MODEL, cost: cost || 0 })
     deck.manifest = {
       agent: agentId,
@@ -180,6 +231,15 @@ function logoDataUrl(deck) {
   return `data:${mime};base64,${fs.readFileSync(file).toString('base64')}`
 }
 
+function imagePathToDataUrl(webPath) {
+  if (!webPath || typeof webPath !== 'string') return null
+  const rel = path.normalize(webPath.replace(/^\/images\//, ''))
+  const file = path.join(store.IMAGES, rel)
+  if (!file.startsWith(store.IMAGES) || !fs.existsSync(file)) return null
+  const mime = MIME[path.extname(file).toLowerCase()] || 'image/png'
+  return `data:${mime};base64,${fs.readFileSync(file).toString('base64')}`
+}
+
 app.post('/api/generate', async (c) => {
   const { deckId, slideId, prompt, verify = true } = await c.req.json().catch(() => ({}))
   const deck = store.getDeck(deckId)
@@ -192,16 +252,25 @@ app.post('/api/generate', async (c) => {
   const spec = deck.agent ? AGENTS[deck.agent] : null
   const logo = logoDataUrl(deck)
 
+  // Slide-level references the user uploaded next to the prompt.
+  const slideRefs = Array.isArray(slide.refs) ? slide.refs : []
+  const slideRefData = slideRefs.map((r) => imagePathToDataUrl(r.path)).filter(Boolean)
+
   const knowledgeSlice = spec ? painterKnowledgeSlice(deck.brand || {}) : ''
   const parts = [
     deck.manifest?.aesthetic ? deck.manifest.aesthetic : deck.style ? `Visual style guide (follow it strictly): ${deck.style}` : null,
     `A single presentation slide image. ${slide.prompt}`,
     knowledgeSlice || null,
+    slideRefData.length
+      ? `The user has attached ${slideRefData.length} reference image${slideRefData.length === 1 ? '' : 's'} to guide this slide. Use them as primary visual reference for composition, subjects, materials, lighting, or product likeness as appropriate — do not copy them verbatim, and preserve the deck's overall visual system.`
+      : null,
     logo && spec?.logoInstruction ? spec.logoInstruction : null,
     'Render all text crisply and legibly. Clean, professional slide design.',
   ].filter(Boolean)
   const basePrompt = parts.join('\n\n')
-  const references = logo ? [{ type: 'image_url', image_url: { url: logo } }] : []
+  const references = []
+  if (logo) references.push({ type: 'image_url', image_url: { url: logo } })
+  for (const url of slideRefData) references.push({ type: 'image_url', image_url: { url } })
 
   const ext = (mediaType) => Object.keys(MIME).find((k) => MIME[k] === mediaType) || '.png'
 
@@ -260,15 +329,18 @@ app.post('/api/generate', async (c) => {
 // ---------- Simple (non-agent) outline ----------
 
 app.post('/api/outline', async (c) => {
-  const { deckId, topic, count = 8 } = await c.req.json().catch(() => ({}))
+  const { deckId, topic, count = 8, refs } = await c.req.json().catch(() => ({}))
   if (!topic) return c.json({ error: 'topic is required' }, 400)
   const deck = store.getDeck(deckId)
   const context = (deck?.context || [])
     .map((x) => `--- ${x.name} ---\n${x.text}`)
     .join('\n\n')
     .slice(0, 12000)
+  const cleanRefs = Array.isArray(refs)
+    ? refs.filter((s) => typeof s === 'string' && s.startsWith('data:image/')).slice(0, 6)
+    : []
   try {
-    const { slides, cost } = await planDeck({ topic, context, count, style: deck?.style || '' })
+    const { slides, cost } = await planDeck({ topic, context, count, style: deck?.style || '', refs: cleanRefs })
     recordUsage({ deckId: deckId || null, kind: 'plan', model: TEXT_MODEL, cost: cost || 0 })
     return c.json({ slides })
   } catch (e) {
